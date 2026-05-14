@@ -1120,3 +1120,12 @@ A detector specialized for visible, partially occluded humans,
 evaluated not only by generic mAP but also by center-hit recall
 and false-hit-through-occlusion behavior.
 ```
+
+
+
+## Sources:
+https://arxiv.org/pdf/1805.00123
+https://arxiv.org/pdf/1909.12118
+https://arxiv.org/pdf/1803.10683
+https://github.com/yakhyo/yolov8-crowdhuman
+https://huggingface.co/datasets/sshao0516/CrowdHuman

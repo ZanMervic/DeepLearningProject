@@ -1,0 +1,4 @@
+data/
+datasets/
+outputs/runs
+outputs/slurm
