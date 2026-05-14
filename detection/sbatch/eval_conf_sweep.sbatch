@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=yolo_eval_all
-#SBATCH --output=/d/hpc/projects/FRI/zm3587/dl/slurm/slurm-yolo-eval-all-%j.out
-#SBATCH --error=/d/hpc/projects/FRI/zm3587/dl/slurm/slurm-yolo-eval-all-%j.err
+#SBATCH --job-name=yolo_conf_sweep
+#SBATCH --output=/d/hpc/projects/FRI/zm3587/dl/slurm/slurm-yolo-conf-sweep-%j.out
+#SBATCH --error=/d/hpc/projects/FRI/zm3587/dl/slurm/slurm-yolo-conf-sweep-%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=06:00:00
+#SBATCH --time=04:00:00
 
 set -euo pipefail
 
@@ -37,23 +37,31 @@ derive_model_name() {
   echo "${base_name%.pt}"
 }
 
-# Positional args with defaults.
-# Keep the historical ordering to avoid breaking existing calls:
+# Positional args.
 #   1 MODEL
 #   2 IMGSZ
-#   3 DATASET_GROUP     all | main | hard | ch | wp | coco | och | ch_wp | ch_wp_coco | ch_wp_coco_och
+#   3 DATASET_GROUP   all | main | hard | ch | wp | coco | och | ch_wp | ch_wp_coco | ch_wp_coco_och
 #   4 BATCH
-#   5 RUN_NAME          defaults to the derived checkpoint/run name
+#   5 CONF_VALUES     comma-separated list, e.g. 0.10,0.15,0.20,0.25,0.30,0.40
+# Optional:
+#   6 IOU
+#   7 MAX_DET
+#   8 RUN_NAME        use "auto" (or leave empty) to derive <model_name>_conf_sweep
 MODEL="${1:-$DL_ROOT/outputs/training/yolo26n_chv_wp_coco_och_640/weights/best.pt}"
 IMGSZ="${2:-640}"
 DATASET_GROUP="${3:-all}"
 BATCH="${4:-16}"
-RUN_NAME="${5:-$(derive_model_name "$MODEL")}"
+CONF_VALUES="${5:-0.10,0.15,0.20,0.25,0.30,0.40}"
+IOU="${6:-}"
+MAX_DET="${7:-}"
+RUN_NAME="${8:-auto}"
+
+MODEL_NAME="$(derive_model_name "$MODEL")"
+if [[ -z "$RUN_NAME" || "$RUN_NAME" == "auto" ]]; then
+  RUN_NAME="${MODEL_NAME}_conf_sweep"
+fi
 
 RUN_DIR="$DL_ROOT/outputs/evaluation/$RUN_NAME"
-SUMMARY_CSV="$RUN_DIR/summary.csv"
-SUMMARY_JSON="$RUN_DIR/summary.json"
-SUMMARY_MD="$RUN_DIR/summary.md"
 
 export PYTHONNOUSERSITE=1
 export YOLO_CONFIG_DIR="$DL_ROOT/.ultralytics"
@@ -63,18 +71,25 @@ mkdir -p "$DL_ROOT/slurm"
 mkdir -p "$RUN_DIR"
 
 # Keep a copy of the full job log inside the evaluation run directory.
-exec > >(tee -a "$RUN_DIR/slurm_eval.out") 2>&1
+exec > >(tee -a "$RUN_DIR/slurm_eval_conf_sweep.out") 2>&1
 
 cd "$DL_ROOT"
 
 echo "Job started on $(hostname)"
 echo "Date: $(date)"
+echo "Run name: $RUN_NAME"
 echo "Model: $MODEL"
 echo "Image size: $IMGSZ"
 echo "Dataset group: $DATASET_GROUP"
 echo "Batch: $BATCH"
-echo "Run name: $RUN_NAME"
+echo "Confidence values: $CONF_VALUES"
 echo "Run directory: $RUN_DIR"
+if [[ -n "$IOU" ]]; then
+  echo "NMS IoU override: $IOU"
+fi
+if [[ -n "$MAX_DET" ]]; then
+  echo "max_det override: $MAX_DET"
+fi
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 
 "$PYTHON_BIN" - <<'PY'
@@ -93,47 +108,37 @@ if torch.cuda.is_available():
 print("Ultralytics:", ultralytics.__version__)
 PY
 
-"$PYTHON_BIN" -u "$SCRIPT_ROOT/hpc_yolo_eval_all.py" \
-  --model "$MODEL" \
-  --imgsz "$IMGSZ" \
-  --dataset-group "$DATASET_GROUP" \
-  --batch "$BATCH" \
-  --name-prefix "$RUN_NAME" \
-  --project-root "$DL_ROOT" \
-  --project "$RUN_DIR" \
-  --device 0 \
-  --workers 8 \
-  --out "$SUMMARY_CSV" \
-  --json-out "$SUMMARY_JSON" \
-  --md-out "$SUMMARY_MD" \
-  --plots
+CMD=(
+  "$PYTHON_BIN" -u "$SCRIPT_ROOT/hpc_yolo_eval_conf_sweep.py"
+  --model "$MODEL"
+  --imgsz "$IMGSZ"
+  --dataset-group "$DATASET_GROUP"
+  --batch "$BATCH"
+  --run-dir "$RUN_DIR"
+  --project-root "$DL_ROOT"
+  --device 0
+  --workers 8
+  --conf-values "$CONF_VALUES"
+)
 
-# Rename Ultralytics dataset folders into the normalized structure used in outputs/evaluation/.
-for generated_dir in "$RUN_DIR"/"${RUN_NAME}"__on_*; do
-  if [[ ! -d "$generated_dir" ]]; then
-    continue
-  fi
+if [[ -n "$IOU" ]]; then
+  CMD+=(--iou "$IOU")
+fi
+if [[ -n "$MAX_DET" ]]; then
+  CMD+=(--max-det "$MAX_DET")
+fi
 
-  dataset_name="${generated_dir##*__on_}"
-  target_dir="$RUN_DIR/$dataset_name"
-  if [[ "$generated_dir" != "$target_dir" ]]; then
-    mv "$generated_dir" "$target_dir"
-  fi
-done
+"${CMD[@]}"
 
 echo "Job finished on $(date)"
 
 # Examples:
-# sbatch -J eval_n_best640 sbatch/eval_merged.sbatch \
-#   /d/hpc/projects/FRI/zm3587/dl/outputs/training/yolo26n_chv_wp_coco_och_640/weights/best.pt \
-#   640 \
-#   all \
-#   16 \
-#   yolo26n_chv_wp_coco_och_640
+# sbatch -J sweep_n_all640 sbatch/eval_conf_sweep.sbatch /d/hpc/projects/FRI/zm3587/dl/outputs/training/yolo26n_chv_wp_coco_och_640/weights/best.pt 640 all 16 0.10,0.15,0.20,0.25,0.30,0.40
 #
-# sbatch -J eval_n_best960 sbatch/eval_merged.sbatch \
+# sbatch -J sweep_n_all960 sbatch/eval_conf_sweep.sbatch \
 #   /d/hpc/projects/FRI/zm3587/dl/outputs/training/yolo26n_chv_wp_coco_och_960/weights/best.pt \
 #   960 \
 #   all \
 #   16 \
-#   yolo26n_chv_wp_coco_och_960
+#   0.10,0.15,0.20,0.25,0.30,0.40 \
+#   0.70
