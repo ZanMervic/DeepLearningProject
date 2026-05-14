@@ -1,0 +1,60 @@
+{
+  "args": {
+    "model": "yolo26n.pt",
+    "data": "/d/hpc/projects/FRI/zm3587/dl/datasets/ch_wp_coco_och.yaml",
+    "name": "yolo26n_ch_wp_coco_och_640",
+    "project": "/d/hpc/projects/FRI/zm3587/dl/runs/person_detection",
+    "epochs": 50,
+    "imgsz": 640,
+    "batch": 16,
+    "device": "0",
+    "workers": 8,
+    "patience": 10,
+    "seed": 42,
+    "freeze": 0,
+    "cache": null,
+    "amp": true,
+    "cos_lr": false,
+    "close_mosaic": 10,
+    "resume": false,
+    "exist_ok": false,
+    "extra_json": null
+  },
+  "train_kwargs": {
+    "data": "/d/hpc/projects/FRI/zm3587/dl/datasets/ch_wp_coco_och.yaml",
+    "epochs": 50,
+    "imgsz": 640,
+    "batch": 16,
+    "device": "0",
+    "workers": 8,
+    "patience": 10,
+    "seed": 42,
+    "project": "/d/hpc/projects/FRI/zm3587/dl/runs/person_detection",
+    "name": "yolo26n_ch_wp_coco_och_640",
+    "freeze": 0,
+    "cache": null,
+    "amp": true,
+    "cos_lr": false,
+    "close_mosaic": 10,
+    "resume": false,
+    "exist_ok": false
+  },
+  "environment": {
+    "timestamp": "2026-05-12T15:13:06",
+    "python": "3.11.15 (main, Mar 11 2026, 17:20:07) [GCC 14.3.0]",
+    "platform": "Linux-5.14.0-611.54.3.el9_7.x86_64-x86_64-with-glibc2.34",
+    "hostname": "gwn02.arnes.si",
+    "cwd": "/d/hpc/projects/FRI/zm3587/dl",
+    "slurm_job_id": "15168151",
+    "slurm_array_task_id": null,
+    "cuda_visible_devices": "0",
+    "torch": "2.7.0+cu118",
+    "cuda_available": true,
+    "cuda_device_count": 1,
+    "cuda_devices": [
+      "NVIDIA H100 PCIe"
+    ],
+    "ultralytics": "8.4.48"
+  },
+  "result_type": "<class 'ultralytics.utils.metrics.DetMetrics'>"
+}

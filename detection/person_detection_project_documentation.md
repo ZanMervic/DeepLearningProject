@@ -1,8 +1,8 @@
 # Person Detection Subproject Documentation
 
-**Project context:** deep-learning-based mobile/near-mobile person detection for a larger camera-based game pipeline.
+**Project context:** deep-learning-based mobile / near-mobile person detection for a larger camera-based game pipeline.
 
-**Detection role in the full system:** given a single frame captured when the player presses “shoot”, detect visible people in the image, pass the relevant person/candidate region to body-part segmentation, and later support person re-identification. The detection model should work when only parts of the person are visible, because the downstream app needs to determine whether a visible body part was hit.
+**Detection role in the full system:** given a single frame captured when the player presses "shoot", detect visible people in the image, pass the relevant person / candidate region to body-part segmentation, and later support person re-identification. The detector should work even when only parts of the person are visible, because the downstream app needs to determine whether a visible body part was hit.
 
 ---
 
@@ -12,60 +12,44 @@ The planned full pipeline is:
 
 ```text
 Input image from phone camera
-  → person detection
-  → select candidate(s), especially around image center / crosshair
-  → body-part segmentation of selected person
-  → ReID using visible body regions
-  → game decision: was the correct visible body part / person hit?
+  -> person detection
+  -> select candidate(s), especially around image center / crosshair
+  -> body-part segmentation of selected person
+  -> ReID using visible body regions
+  -> game decision: was the correct visible body part / person hit?
 ```
 
-The detection subproblem is therefore not generic “detect all COCO objects”. It is specifically:
+The detection subproblem is therefore not generic "detect all COCO objects". It is specifically:
 
 ```text
 Detect visible person regions robustly, including partial and occluded people, with a model small enough to be a plausible mobile candidate.
 ```
 
-Important design decision: the detector should predict the **visible person region**, not hallucinate a full-body bounding box behind occluders. Earlier we considered whether a detector should infer the full body box even when only a leg is visible, because then checking whether the crosshair intersects the person would be easy. We rejected that as the main target because it would create physically incorrect game behavior: the player could appear to hit a person “through a wall” or behind an occluder. Therefore, the model target is the visible region/person extent that is actually observable in the image.
+The key design decision is that the detector should predict the **visible person region**, not hallucinate a full-body box behind occluders. If only a leg is visible behind a wall, a full-body box would create physically wrong game behavior by allowing "hits through walls". Therefore, visible-region detection is the correct target for this project.
 
-Another important design decision: the model does **not** need to run continuously in real time on every camera frame. The intended app can process a single captured frame after the shoot action. This relaxes latency requirements substantially and makes a somewhat heavier model or higher resolution more realistic, while still keeping mobile deployment in mind.
+Another important design decision is that the detector does **not** need to run continuously on every camera frame. The app can process a single captured frame after the shoot action, which makes somewhat heavier models and higher resolutions more realistic while still keeping mobile deployment in mind.
 
 ---
 
-## 2. Model-family decision: why YOLO26 was used
+## 2. Why YOLO26 was used
 
-### 2.1 Requirements
+The detector needed to satisfy several constraints:
 
-The detection model needs to satisfy several constraints:
+- strong person-detection performance
+- robustness to occlusion and partial visibility
+- reasonable inference speed
+- exportability to mobile / edge formats
+- easy fine-tuning on YOLO-format datasets
+- manageable implementation effort for a course project
 
-- strong person-detection performance;
-- robustness to occlusion and partial visibility;
-- reasonably fast inference;
-- exportability to mobile or edge formats;
-- easy fine-tuning on custom YOLO-format datasets;
-- manageable implementation effort for a course project.
+We considered transformer-style alternatives such as Grounding DINO and RF-DETR, but Ultralytics YOLO26 was the most practical choice because it already provides:
 
-### 2.2 CNN-style YOLO detector vs transformer detector
+- pretrained checkpoints in several model sizes
+- straightforward fine-tuning and validation workflows
+- export tooling for ONNX, CoreML, TFLite, TensorRT, and OpenVINO
+- a clear speed / accuracy scale from `n` to `x`
 
-We considered modern transformer detectors and open-vocabulary detectors, especially:
-
-- **Grounding DINO**: an open-set detector combining a transformer detector with language grounding. It can detect arbitrary text-specified categories such as “person” and is powerful for zero-shot or pseudo-labeling use cases. However, it is not primarily a small mobile detector and is unnecessarily general for a fixed one-class person-detection problem.
-- **RF-DETR**: a recent real-time detection transformer using neural architecture search to find accuracy-latency tradeoffs. It is interesting as a modern comparison baseline, but switching the project to RF-DETR would add additional framework/setup risk and is not necessary for the core project objective.
-
-We chose **Ultralytics YOLO26** as the main model family because it directly supports training, validation, export, and deployment workflows, and because the YOLO26 family includes multiple model sizes (`n`, `s`, `m`, `l`, `x`) with clear accuracy/speed tradeoffs. YOLO26 is also explicitly positioned by Ultralytics for edge and low-power deployment, with an end-to-end NMS-free design and export support to formats such as ONNX, CoreML, TFLite, TensorRT, and OpenVINO.
-
-Relevant YOLO26 model-size facts from Ultralytics documentation:
-
-| Model | Params | FLOPs @640 | COCO mAP50-95 |
-|---|---:|---:|---:|
-| YOLO26n | 2.4M | 5.4B | 40.9 |
-| YOLO26s | 9.5M | 20.7B | 48.6 |
-| YOLO26m | 20.4M | 68.2B | 53.1 |
-| YOLO26l | 24.8M | 86.4B | 55.0 |
-| YOLO26x | 55.7M | 193.9B | 57.5 |
-
-This made `yolo26n` and `yolo26s` the most relevant models for the project. Larger models are useful as possible upper-bound references, but they are much less relevant for mobile deployment. The `x` model has roughly 36× the FLOPs of `n` and 9× the FLOPs of `s` at the same input size, which is hard to justify for the final app.
-
-### 2.3 One-class detector, not “person vs not-person”
+This made `yolo26n` and `yolo26s` the most relevant models for the project. Larger models such as `x` are useful as upper-bound references, but much less realistic for final deployment.
 
 The model is trained as a **single-class detector**:
 
@@ -74,51 +58,37 @@ names:
   0: person
 ```
 
-We specifically did **not** add a separate `not-person` class. In object detection, background is learned implicitly from regions without labeled objects. Adding a `not-person` class would require arbitrarily annotating background objects, which is ill-defined and would likely degrade training.
-
-Ultralytics automatically adapts the detection head from the COCO pretrained class count (`nc=80`) to the dataset class count (`nc=1`) during fine-tuning. This was confirmed in logs by messages such as:
-
-```text
-Overriding model.yaml nc=80 with nc=1
-```
-
-This means the model is not wasting its classification head on 80 COCO classes after fine-tuning. Most compute still remains in the backbone/neck feature extraction, but the task is correctly defined as person-only detection.
+We explicitly did **not** add a `not-person` class. Background is already learned implicitly in detection, and adding a `not-person` class would require arbitrary negative annotations that are not well defined.
 
 ---
 
 ## 3. Dataset selection
 
-The datasets were selected to cover different parts of the target problem: visible people, occlusion, crowds, pedestrians, and general person appearance.
+The datasets were selected to cover visible-person detection, crowds, pedestrians, general person diversity, and hard occlusion.
 
 ### 3.1 CrowdHuman
 
-CrowdHuman is highly relevant because it was built for crowded human detection and provides multiple box types, including visible boxes. We used the **visible bounding box (`vbox`)** annotations because our desired target is the visible person region, not the full body behind occluders.
+CrowdHuman is the most important dataset in the project because it provides visible-region boxes. We use the **visible bounding box (`vbox`)** annotations rather than full-body boxes.
 
 Role in project:
 
 ```text
-Main occlusion/crowd training dataset and baseline dataset.
+Main occlusion / crowd training dataset and main fine-tuning baseline.
 ```
-
-Why useful:
-
-- many crowded scenes;
-- explicit visible-region annotation;
-- directly aligned with the “do not shoot through walls/occluders” decision.
 
 ### 3.2 WiderPerson
 
-WiderPerson adds pedestrian/person diversity and partial visibility. It is useful for generalizing beyond CrowdHuman’s distribution. During conversion, person-like categories were mapped to the single class `person`; ignore/crowd categories should not be treated as standard person boxes.
+WiderPerson adds pedestrian and partial-visibility diversity beyond CrowdHuman.
 
 Role in project:
 
 ```text
-Second training dataset for pedestrian and partial-person diversity.
+Second training dataset for pedestrian / partial-person diversity.
 ```
 
-### 3.3 COCO person subset / COCO2017 person
+### 3.3 COCO2017 person subset
 
-COCO provides broad, general-purpose person instances in varied scenes. It is less specialized for occluded visible-person detection, but it adds visual diversity and generalization.
+COCO adds broad general person appearance diversity, though it is less specialized for occlusion than CrowdHuman.
 
 Role in project:
 
@@ -126,22 +96,9 @@ Role in project:
 General person-detection diversity dataset.
 ```
 
-Potential issue:
-
-```text
-COCO box style may differ from CrowdHuman visible boxes; this can create annotation-style mismatch.
-```
-
 ### 3.4 OCHuman
 
-OCHuman contains heavily occluded people and is especially relevant to the target app because partial visibility is central to the task. However, OCHuman was originally often used as a challenging validation/testing benchmark for occlusion robustness. This creates two valid uses:
-
-| Use | Interpretation |
-|---|---|
-| Hold OCHuman out for evaluation | Measures generalization to a hard occlusion benchmark. |
-| Include OCHuman in training | Makes sense for production if occlusion is central to the target use case. |
-
-It is not “bad” to train on OCHuman. The only caveat is methodological: if OCHuman is included in training, then OCHuman validation performance is no longer a clean unseen-dataset generalization claim. For production, using all relevant occlusion data is reasonable; for a clean benchmark, keeping OCHuman held out is more convincing.
+OCHuman is a hard occlusion dataset. It can be used either as a difficult evaluation benchmark or as production-oriented training data when heavy occlusion is central to the target use case.
 
 Role in project:
 
@@ -153,9 +110,7 @@ Hard occlusion evaluation set and optional production-oriented training data.
 
 ## 4. Data preparation and label compatibility
 
-### 4.1 Unified YOLO format
-
-All datasets were converted to YOLO-compatible detection format:
+All datasets were converted to a unified YOLO detection format:
 
 ```text
 dataset/
@@ -168,7 +123,7 @@ dataset/
   data.yaml
 ```
 
-Each label file contains normalized YOLO rows:
+Each label file contains normalized rows of the form:
 
 ```text
 class_id x_center y_center width height
@@ -181,32 +136,21 @@ names:
   0: person
 ```
 
-Therefore, the datasets are **class-compatible**. The main remaining concern is not class mismatch, but **bounding-box semantic mismatch**.
+The datasets are class-compatible. The main remaining issue is **box semantic mismatch**:
 
-### 4.2 Bounding-box semantic differences
+- CrowdHuman uses visible-region boxes
+- WiderPerson has pedestrian / visible-person-like boxes
+- COCO uses general person boxes
+- OCHuman can be especially tight around visible regions depending on the conversion
 
-Although every dataset is mapped to `class 0 = person`, the meaning of a “person box” can differ:
+This matters because mixed training can improve robustness but also create localization-style compromises between datasets.
 
-| Dataset | Approximate box semantics |
-|---|---|
-| CrowdHuman | Visible person region (`vbox`) was used. |
-| WiderPerson | Pedestrian/person/partial-person boxes; likely visible-person-like but not identical. |
-| COCO person | General person instance boxes; can differ from visible-box conventions. |
-| OCHuman | Heavily occluded people; depending on conversion, boxes may be mask-derived and very tight to visible regions. |
+Visual inspection scripts were used to confirm that:
 
-This is important because training on mixed datasets can improve generality but slightly reduce performance on the original dataset due to inconsistent localization targets. The effect is especially visible in stricter metrics such as mAP50-95.
-
-### 4.3 Visual inspection
-
-A visual inspection step was included because most detection-training failures come from silent label-conversion errors. The inspection script overlays YOLO labels on images so we can verify:
-
-- boxes are aligned with people;
-- boxes are not shifted or scaled incorrectly;
-- class IDs are all `0`;
-- ignore/crowd regions are not incorrectly labeled as normal persons;
-- train/val folders have matching images and labels.
-
-This was important before launching long HPC fine-tuning jobs.
+- boxes are aligned with people
+- labels are normalized correctly
+- class IDs are correct
+- ignore / crowd regions are not accidentally treated as normal positives
 
 ---
 
@@ -214,28 +158,19 @@ This was important before launching long HPC fine-tuning jobs.
 
 ### 5.1 Fine-tuning approach
 
-The models were initialized from pretrained YOLO26 checkpoints (`yolo26n.pt`, `yolo26s.pt`, etc.) and fine-tuned on the custom one-class person datasets.
+The models were initialized from pretrained YOLO26 checkpoints (`yolo26n.pt`, `yolo26s.pt`, `yolo26x.pt`) and then fine-tuned on the one-class person datasets.
 
-Fine-tuning does not merely train a new final layer. Unless layers are explicitly frozen, Ultralytics updates the trainable weights throughout the model. This is useful because the model needs to adapt not only to the `person` class, but also to the target annotation style: visible/occluded person regions.
-
-Training used validation during training for early stopping/model selection. Ultralytics saves:
-
-```text
-runs/person_detection/<run_name>/weights/best.pt
-runs/person_detection/<run_name>/weights/last.pt
-```
-
-`best.pt` should be used for reporting/evaluation. `last.pt` is mainly useful for resuming interrupted training.
+Unless layers are explicitly frozen, Ultralytics fine-tuning updates trainable weights across the model, not just a final classification layer. This is useful because the detector must adapt not only to the `person` class but also to the visible-region annotation style.
 
 ### 5.2 Input size
 
-Experiments were run at both `imgsz=640` and `imgsz=960`. The completed training set included a systematic `yolo26n @640` dataset-composition ablation, selected `yolo26n @960` runs, and one stronger `yolo26s @960` fine-tuned model.
+Experiments were run at `imgsz=640` and `imgsz=960`.
 
 Reasoning:
 
-- `640` is cheaper and closer to typical YOLO default workflows;
-- `960` may help with small or partially visible persons because more pixels are available for the same object;
-- compute scales approximately with image area, so `960` costs about `(960/640)^2 = 2.25×` more raw image compute than `640`.
+- `640` is cheaper and closer to common YOLO defaults
+- `960` may help with small or partially visible people
+- `960` costs about 2.25x the image-area compute of `640`
 
 ### 5.3 Model sizes
 
@@ -243,129 +178,88 @@ Main focus:
 
 ```text
 yolo26n: mobile candidate
-yolo26s: stronger but still practical model
+yolo26s: stronger but still plausible
 ```
 
-Larger models were discussed (`m`, `l`, `x`), but not prioritized because:
-
-- they are much more compute-intensive;
-- they are less realistic for mobile deployment;
-- the project goal is not simply to maximize benchmark mAP with an impractically large model;
-- dataset composition and evaluation design are more important for this project than brute-force model size.
+`yolo26x` was used only as a stock upper-bound reference. A fine-tuning attempt for `x` was started but not completed.
 
 ### 5.4 Merged dataset training
 
-Rather than physically copying datasets together, merged YAML files were created using lists of image folders:
+Rather than physically copying all data into one folder, merged YAML files were created using lists of image folders.
 
-```yaml
-path: /d/hpc/projects/FRI/zm3587/dl/datasets
-
-train:
-  - crowdhuman/images/train
-  - widerperson/images/train
-  - coco2017/images/train
-
-val:
-  - crowdhuman/images/val
-  - widerperson/images/val
-  - coco2017/images/val
-
-names:
-  0: person
-```
-
-This avoids duplicating data and makes training recipes explicit.
-
-The systematic dataset recipes were:
+The main merged recipes were:
 
 ```text
-CH
-CH + WP
-CH + WP + COCO
-CH + WP + COCO + OCH
+CHV
+CHV + WP
+CHV + WP + COCO
+CHV + WP + COCO + OCH
 ```
 
-The scientific reason for this sequence is to test whether each additional dataset improves generalization or simply causes domain interference.
+where `CHV` means CrowdHuman visible boxes.
 
 ---
 
 ## 6. HPC and engineering issues solved
 
-A significant part of the project was building a reliable training/evaluation workflow on HPC. This is worth mentioning in the report because it shows practical engineering work, not just running a notebook.
+This subproject included a substantial amount of engineering work on the HPC cluster, not just notebook experimentation.
 
 ### 6.1 Conda and Python package isolation
 
-An issue occurred where packages were silently imported from:
+Packages were initially leaking in from:
 
 ```text
 ~/.local/lib/python3.11/site-packages
 ```
 
-instead of the intended conda environment. This caused inconsistencies between interactive shell behavior and Slurm job behavior. The solution was to set:
+The fix was:
 
 ```bash
 export PYTHONNOUSERSITE=1
 ```
 
-and install all required packages into the conda environment itself. This made the environment reproducible and prevented user-site package leakage.
+and installing required packages into the intended conda environment.
 
 ### 6.2 V100 compatibility issue
 
-The HPC GPU nodes used Tesla V100S GPUs. A newer PyTorch/CUDA wheel was initially installed, but it did not include kernels for V100 compute capability (`sm_70`). The error was:
+The HPC nodes used Tesla V100S GPUs. A newer PyTorch / CUDA wheel did not include compatible kernels for `sm_70`, causing:
 
 ```text
 CUDA error: no kernel image is available for execution on the device
 ```
 
-The solution was to create a V100-compatible environment using a CUDA 11.8 PyTorch wheel, because the newer PyTorch build supported newer compute capabilities but not V100’s compute capability.
-
-A clean environment was created for V100 training and tested inside an actual Slurm GPU allocation before training.
+The fix was to build a V100-compatible environment with CUDA 11.8 PyTorch wheels and test it inside a real Slurm GPU allocation before launching training.
 
 ### 6.3 Slurm scripts
 
 Reusable Slurm scripts were created for:
 
-- single training jobs;
-- parameterized training jobs;
-- merged-dataset training;
-- evaluating a model on one dataset;
-- evaluating a model on all datasets.
-
-The scripts use positional parameters with defaults so that many models/datasets can be tested without creating a separate `.sbatch` file for every run.
-
-Example argument structure for training:
-
-```text
-MODEL IMGSZ DATASET_KEY BATCH NAME EPOCHS PATIENCE FREEZE
-```
-
-Example argument structure for evaluation:
-
-```text
-MODEL IMGSZ DATASET_GROUP BATCH NAME_PREFIX
-```
+- single training jobs
+- merged-dataset training jobs
+- evaluating one model on one dataset
+- evaluating one model on all datasets
 
 ### 6.4 Dataset cache race issue
 
-One training job failed before training started due to an Ultralytics dataset cache issue:
+One job failed due to an Ultralytics dataset cache problem:
 
 ```text
 AssertionError during cache hash check
 FileNotFoundError: labels/val.cache
 ```
 
-This was diagnosed as a likely stale cache or race condition where multiple jobs touched the same dataset `.cache` files simultaneously. The solution was to delete cache files and rerun the failed job, preferably avoiding simultaneous first-time cache generation for multiple jobs using the same dataset.
+This was traced to stale or concurrently modified cache files. The practical fix was to remove the cache and rerun the failed job.
 
 ### 6.5 Run directory management
 
-Ultralytics creates new directories when a run name already exists, e.g.:
+Ultralytics creates new directories when a run name already exists, for example:
 
 ```text
-yolo26s_crowdhuman_960
-yolo26s_crowdhuman_960-2
+yolo26s_chv_960
+yolo26s_chv_960-2
 ```
 
-This is intentional overwrite protection. The completed run must be identified by checking for:
+The completed run must be identified by checking for:
 
 ```text
 weights/best.pt
@@ -373,7 +267,26 @@ weights/last.pt
 results.csv
 ```
 
-The `.pt` files in the project root, such as `yolo26n.pt`, are pretrained starting checkpoints, not fine-tuned results. Fine-tuned models are stored inside the run folders.
+For local organization, the output folders were normalized into a shorter naming scheme:
+
+```text
+stock = untouched official Ultralytics checkpoint
+chv   = CrowdHuman visible-box fine-tune
+wp    = WiderPerson
+coco  = COCO2017 person subset
+och   = OCHuman
+```
+
+Examples:
+
+```text
+outputs/training/yolo26n_chv_640
+outputs/training/yolo26n_chv_wp_coco_och_960
+outputs/evaluation/yolo26n_stock_640
+outputs/evaluation/yolo26s_chv_960
+```
+
+The `.pt` files in the project root are **stock checkpoints** from Ultralytics, not fine-tuned results.
 
 ---
 
@@ -381,7 +294,7 @@ The `.pt` files in the project root, such as `yolo26n.pt`, are pretrained starti
 
 ### 7.1 Why separate validation sets are better than merged validation only
 
-Evaluating on one merged validation set gives a single average number, but it hides where the model works or fails. Therefore, each model was evaluated separately on:
+Evaluating on one merged validation set gives one average number, but hides where the model succeeds or fails. Therefore, each checkpoint was evaluated separately on:
 
 ```text
 CrowdHuman validation
@@ -390,163 +303,146 @@ COCO2017/person validation
 OCHuman validation
 ```
 
-This is more informative because it reveals whether a model improved broadly or only became specialized to one dataset.
-
 ### 7.2 Metrics used
-
-The main reported metrics are:
 
 | Metric | Interpretation |
 |---|---|
 | Precision | Of predicted detections, how many are correct? |
 | Recall | Of true persons, how many were detected? |
-| mAP50 | Detection AP at IoU threshold 0.50; lenient localization metric. |
-| mAP50-95 | Average mAP over IoU thresholds 0.50 to 0.95; stricter and more sensitive to box quality. |
-| Inference time | Approximate model inference speed in validation environment. |
+| mAP50 | AP at IoU 0.50; lenient localization metric |
+| mAP50-95 | Average AP from IoU 0.50 to 0.95; stricter localization metric |
+| Inference time | Approximate model speed in the validation environment |
 
-For this app, **recall** is especially important. If the detector misses a partially visible person, downstream segmentation/ReID cannot recover that person. Some false positives are less harmful because later stages can reject them.
+For the app, recall is especially important. If the detector misses a partially visible person, downstream segmentation / ReID cannot recover that target.
 
-### 7.3 Evaluation scripts
-
-The evaluator was modified to run one model against multiple dataset YAMLs and produce:
+Important disclaimer on timing:
 
 ```text
-CSV table of metrics
-JSON details
-Markdown summary table
-per-dataset Ultralytics output folders with plots
+The inference-time numbers in this document are not perfectly comparable across all checkpoints.
+Most evaluations were run on a Tesla V100S-PCIE-32GB, but yolo26s_stock_640 was evaluated on an NVIDIA H100 PCIe.
+Therefore, the timing columns are useful as rough reference numbers, but not as a perfectly controlled hardware-normalized speed benchmark.
 ```
 
-This made it easier to compare models systematically rather than manually launching many separate evaluation jobs.
+### 7.3 Evaluation outputs
+
+The evaluator produces:
+
+- `summary.csv`
+- `summary.json`
+- `summary.md`
+- per-dataset Ultralytics result folders with plots and example images
 
 ### 7.4 Completed experiment inventory
 
-The original plan contained several possible experiment families: pretrained vs fine-tuned comparison, mobile model vs stronger model, input-size comparison, visible-box vs full-body-box ablation, custom phone-shot evaluation, merged-dataset fine-tuning, and optional high-accuracy reference models. The completed detection experiments focused most heavily on the **mobile-relevant YOLO26n models**, dataset-composition ablations, and cross-dataset evaluation.
-
 Completed fine-tuning runs:
 
-| # | Model | Input size | Training data | Purpose |
-|---:|---|---:|---|---|
-| 1 | YOLO26n | 640 | CrowdHuman | baseline visible-person fine-tune |
-| 2 | YOLO26n | 640 | CrowdHuman + WiderPerson | test effect of adding pedestrian/partial-person diversity |
-| 3 | YOLO26n | 640 | CrowdHuman + WiderPerson + COCO2017 person | test effect of adding general person diversity |
-| 4 | YOLO26n | 640 | CrowdHuman + WiderPerson + COCO2017 person + OCHuman | test effect of adding hard occlusion data |
-| 5 | YOLO26n | 960 | CrowdHuman | input-size comparison for the primary dataset |
-| 6 | YOLO26n | 960 | CrowdHuman + WiderPerson + COCO2017 person + OCHuman | higher-resolution all-data mobile candidate |
-| 7 | YOLO26s | 960 | CrowdHuman | stronger fine-tuned reference model |
+| Run | Model | Input size | Training data | Purpose |
+|---|---|---:|---|---|
+| `yolo26n_chv_640` | YOLO26n | 640 | CrowdHuman visible boxes | main fine-tuned baseline |
+| `yolo26n_chv_wp_640` | YOLO26n | 640 | CHV + WP | test added pedestrian / partial-person diversity |
+| `yolo26n_chv_wp_coco_640` | YOLO26n | 640 | CHV + WP + COCO | test added general person diversity |
+| `yolo26n_chv_wp_coco_och_640` | YOLO26n | 640 | CHV + WP + COCO + OCH | all-data mobile candidate |
+| `yolo26n_chv_960` | YOLO26n | 960 | CrowdHuman visible boxes | input-size comparison |
+| `yolo26n_chv_wp_coco_och_960` | YOLO26n | 960 | CHV + WP + COCO + OCH | higher-resolution all-data candidate |
+| `yolo26s_chv_960` | YOLO26s | 960 | CrowdHuman visible boxes | stronger fine-tuned reference |
 
-Completed evaluation runs:
+Completed cross-dataset evaluation runs:
 
-Each of the following model checkpoints was evaluated separately on all four validation datasets: CrowdHuman, WiderPerson, COCO2017 person, and OCHuman.
+| Run | Type | Input size | Fine-tuned? | Eval GPU | Purpose |
+|---|---|---:|---|---|---|
+| `yolo26n_stock_640` | YOLO26n stock checkpoint | 640 | no | Tesla V100S-PCIE-32GB | smallest stock reference |
+| `yolo26n_stock_960` | YOLO26n stock checkpoint | 960 | no | Tesla V100S-PCIE-32GB | stock reference at higher input size |
+| `yolo26n_chv_640` | YOLO26n fine-tune | 640 | yes | Tesla V100S-PCIE-32GB | `n` fine-tuned baseline |
+| `yolo26n_chv_960` | YOLO26n fine-tune | 960 | yes | Tesla V100S-PCIE-32GB | `chv` input-size comparison |
+| `yolo26n_chv_wp_640` | YOLO26n fine-tune | 640 | yes | Tesla V100S-PCIE-32GB | merged-data ablation |
+| `yolo26n_chv_wp_coco_640` | YOLO26n fine-tune | 640 | yes | Tesla V100S-PCIE-32GB | merged-data ablation |
+| `yolo26n_chv_wp_coco_och_640` | YOLO26n fine-tune | 640 | yes | Tesla V100S-PCIE-32GB | all-data mobile candidate |
+| `yolo26n_chv_wp_coco_och_960` | YOLO26n fine-tune | 960 | yes | Tesla V100S-PCIE-32GB | higher-resolution all-data mobile candidate |
+| `yolo26s_stock_640` | YOLO26s stock checkpoint | 640 | no | NVIDIA H100 PCIe | stronger stock reference |
+| `yolo26s_stock_960` | YOLO26s stock checkpoint | 960 | no | Tesla V100S-PCIE-32GB | stronger stock reference at higher input size |
+| `yolo26s_chv_960` | YOLO26s fine-tune | 960 | yes | Tesla V100S-PCIE-32GB | stronger fine-tuned reference |
+| `yolo26x_stock_960` | YOLO26x stock checkpoint | 960 | no | Tesla V100S-PCIE-32GB | high-capacity upper-bound reference |
 
-| # | Model / checkpoint type | Input size | Fine-tuned? | Training data | Evaluation sets | Purpose |
-|---:|---|---:|---|---|---|---|
-| 1 | YOLO26n | 640 | yes | CrowdHuman | all four datasets | CrowdHuman-only fine-tuned baseline |
-| 2 | YOLO26n | 960 | yes | CrowdHuman | all four datasets | effect of higher input size on CrowdHuman fine-tune |
-| 3 | YOLO26n | 640 | yes | CrowdHuman + WiderPerson | all four datasets | merged-data ablation |
-| 4 | YOLO26n | 640 | yes | CrowdHuman + WiderPerson + COCO2017 person | all four datasets | merged-data ablation |
-| 5 | YOLO26n | 640 | yes | CrowdHuman + WiderPerson + COCO2017 person + OCHuman | all four datasets | all-data ablation |
-| 6 | YOLO26n | 960 | yes | CrowdHuman + WiderPerson + COCO2017 person + OCHuman | all four datasets | higher-resolution all-data candidate |
-| 7 | YOLO26n | 640 | no | COCO-pretrained base checkpoint | all four datasets | pretrained baseline |
-| 8 | YOLO26n | 960 | no | COCO-pretrained base checkpoint | all four datasets | pretrained baseline at higher input size |
-| 9 | YOLO26s | 960 | yes | CrowdHuman | all four datasets | stronger fine-tuned reference |
-| 10 | YOLO26s | 640 | no | COCO-pretrained base checkpoint | all four datasets | stronger pretrained baseline |
-| 11 | YOLO26s | 960 | no | COCO-pretrained base checkpoint | all four datasets | stronger pretrained baseline at higher input size |
-| 12 | YOLO26x | 960 | no | COCO-pretrained base checkpoint | all four datasets | high-capacity upper-bound reference without fine-tuning |
-
-This means the final detection work deviated from the initial minimum plan in a useful direction: instead of only training one or two models, the project built a matrix of fine-tuned, pretrained, mobile-sized, stronger, and high-capacity reference checkpoints, then evaluated each across all public validation domains.
+Older single-dataset evaluations and the incomplete `yolo26x` fine-tuning attempt were kept in `outputs/archive/` but are not part of the main final result matrix.
 
 ---
 
-## 8. Current experimental results: YOLO26n @ 640
+## 8. Current experimental results
 
-The most systematic completed result set is for `yolo26n` at input size `640`, trained on different dataset combinations.
+### 8.1 Macro-average across all four validation datasets
 
-Notation:
+The following table reports macro-averages across CrowdHuman, WiderPerson, COCO2017 person, and OCHuman validation sets.
 
-```text
-CH = CrowdHuman
-WP = WiderPerson
-COCO = COCO2017 person subset
-OCH = OCHuman
-```
+| Run | Avg mAP50 | Avg mAP50-95 | Avg Precision | Avg Recall | Avg Inference ms |
+|---|---:|---:|---:|---:|---:|
+| `yolo26n_stock_640` | 0.6515 | 0.3793 | 0.7555 | 0.5704 | 1.2404 |
+| `yolo26n_stock_960` | 0.6700 | 0.3737 | 0.7467 | 0.6031 | 2.1623 |
+| `yolo26n_chv_640` | 0.7147 | 0.4259 | 0.7571 | 0.6462 | 1.3253 |
+| `yolo26n_chv_960` | 0.7310 | 0.4444 | 0.7494 | 0.6756 | 2.4477 |
+| `yolo26n_chv_wp_640` | 0.7315 | 0.4614 | 0.7632 | 0.6561 | 1.5421 |
+| `yolo26n_chv_wp_coco_640` | 0.7539 | 0.4905 | 0.8035 | 0.6573 | 1.5534 |
+| `yolo26n_chv_wp_coco_och_640` | 0.7780 | 0.5398 | 0.8172 | 0.6700 | 1.3099 |
+| `yolo26n_chv_wp_coco_och_960` | 0.8088 | 0.5724 | 0.8293 | 0.6991 | 2.2645 |
+| `yolo26s_stock_640` | 0.7105 | 0.4324 | 0.7753 | 0.6319 | 0.9923 |
+| `yolo26s_stock_960` | 0.7162 | 0.4166 | 0.7584 | 0.6486 | 4.7255 |
+| `yolo26s_chv_960` | 0.7523 | 0.4722 | 0.7508 | 0.7051 | 4.5752 |
+| `yolo26x_stock_960` | 0.7466 | 0.4279 | 0.7642 | 0.6867 | 29.0182 |
 
-### 8.1 Full result table
+The best overall macro-average comes from `yolo26n_chv_wp_coco_och_960`.
+
+Timing note: the macro-average inference times above mix V100 and H100 evaluation runs. In the active 12-run matrix, `yolo26s_stock_640` is the only run evaluated on H100; the others were evaluated on V100.
+
+### 8.2 Detailed `yolo26n @640` dataset-composition ablation
 
 | Train set | Eval set | mAP50 | mAP50-95 | Precision | Recall | Inference ms |
 |---|---|---:|---:|---:|---:|---:|
-| CH | CrowdHuman | 0.7599 | 0.4824 | 0.8037 | 0.6615 | 1.9946 |
-| CH | WiderPerson | 0.6590 | 0.2739 | 0.7571 | 0.5942 | 1.1337 |
-| CH | COCO2017 | 0.6460 | 0.4144 | 0.6856 | 0.5837 | 1.0383 |
-| CH | OCHuman | 0.7939 | 0.5327 | 0.7818 | 0.7457 | 1.1348 |
-| CH + WP | CrowdHuman | 0.7553 | 0.4721 | 0.8017 | 0.6543 | 1.6811 |
-| CH + WP | WiderPerson | 0.7503 | 0.4676 | 0.8124 | 0.6386 | 2.3089 |
-| CH + WP | COCO2017 | 0.6389 | 0.4050 | 0.6695 | 0.5955 | 1.0884 |
-| CH + WP | OCHuman | 0.7815 | 0.5007 | 0.7691 | 0.7359 | 1.0902 |
-| CH + WP + COCO | CrowdHuman | 0.7289 | 0.4594 | 0.7919 | 0.6183 | 1.5948 |
-| CH + WP + COCO | WiderPerson | 0.7368 | 0.4597 | 0.8151 | 0.6217 | 2.1126 |
-| CH + WP + COCO | COCO2017 | 0.7736 | 0.5388 | 0.8122 | 0.6712 | 1.3679 |
-| CH + WP + COCO | OCHuman | 0.7764 | 0.5040 | 0.7948 | 0.7179 | 1.1383 |
-| CH + WP + COCO + OCH | CrowdHuman | 0.7282 | 0.4592 | 0.7886 | 0.6182 | 1.7854 |
-| CH + WP + COCO + OCH | WiderPerson | 0.7354 | 0.4596 | 0.8135 | 0.6184 | 1.1954 |
-| CH + WP + COCO + OCH | COCO2017 | 0.7740 | 0.5400 | 0.8051 | 0.6720 | 1.1147 |
-| CH + WP + COCO + OCH | OCHuman | 0.8743 | 0.7004 | 0.8615 | 0.7716 | 1.1440 |
+| CHV | CrowdHuman | 0.7599 | 0.4824 | 0.8037 | 0.6615 | 1.9946 |
+| CHV | WiderPerson | 0.6590 | 0.2739 | 0.7571 | 0.5942 | 1.1337 |
+| CHV | COCO2017 | 0.6460 | 0.4144 | 0.6856 | 0.5837 | 1.0383 |
+| CHV | OCHuman | 0.7939 | 0.5327 | 0.7818 | 0.7457 | 1.1348 |
+| CHV + WP | CrowdHuman | 0.7553 | 0.4721 | 0.8017 | 0.6543 | 1.6811 |
+| CHV + WP | WiderPerson | 0.7503 | 0.4676 | 0.8124 | 0.6386 | 2.3089 |
+| CHV + WP | COCO2017 | 0.6389 | 0.4050 | 0.6695 | 0.5955 | 1.0884 |
+| CHV + WP | OCHuman | 0.7815 | 0.5007 | 0.7691 | 0.7359 | 1.0902 |
+| CHV + WP + COCO | CrowdHuman | 0.7289 | 0.4594 | 0.7919 | 0.6183 | 1.5948 |
+| CHV + WP + COCO | WiderPerson | 0.7368 | 0.4597 | 0.8151 | 0.6217 | 2.1126 |
+| CHV + WP + COCO | COCO2017 | 0.7736 | 0.5388 | 0.8122 | 0.6712 | 1.3679 |
+| CHV + WP + COCO | OCHuman | 0.7764 | 0.5040 | 0.7948 | 0.7179 | 1.1383 |
+| CHV + WP + COCO + OCH | CrowdHuman | 0.7282 | 0.4592 | 0.7886 | 0.6182 | 1.7854 |
+| CHV + WP + COCO + OCH | WiderPerson | 0.7354 | 0.4596 | 0.8135 | 0.6184 | 1.1954 |
+| CHV + WP + COCO + OCH | COCO2017 | 0.7740 | 0.5400 | 0.8051 | 0.6720 | 1.1147 |
+| CHV + WP + COCO + OCH | OCHuman | 0.8743 | 0.7004 | 0.8615 | 0.7716 | 1.1440 |
 
-### 8.2 Macro-average across validation datasets
+Macro-average for that ablation:
 
 | Train set | Avg mAP50 | Avg mAP50-95 | Avg Precision | Avg Recall |
 |---|---:|---:|---:|---:|
-| CH | 0.7147 | 0.4258 | 0.7570 | 0.6463 |
-| CH + WP | 0.7315 | 0.4614 | 0.7632 | 0.6561 |
-| CH + WP + COCO | 0.7539 | 0.4905 | 0.8035 | 0.6573 |
-| CH + WP + COCO + OCH | 0.7780 | 0.5398 | 0.8172 | 0.6700 |
+| CHV | 0.7147 | 0.4259 | 0.7571 | 0.6462 |
+| CHV + WP | 0.7315 | 0.4614 | 0.7632 | 0.6561 |
+| CHV + WP + COCO | 0.7539 | 0.4905 | 0.8035 | 0.6573 |
+| CHV + WP + COCO + OCH | 0.7780 | 0.5398 | 0.8172 | 0.6700 |
 
-### 8.3 Main interpretation
 
-The results show a clear and expected domain-specialization pattern.
+### 8.3 Strongest checkpoints by evaluation domain
 
-Adding WiderPerson strongly improves WiderPerson validation performance:
+| Eval set | Best checkpoint | mAP50-95 | Notes |
+|---|---|---:|---|
+| CrowdHuman | `yolo26s_chv_960` | 0.5985 | best CH-specific result |
+| WiderPerson | `yolo26n_chv_wp_coco_och_960` | 0.4888 | best merged-data result on WP |
+| COCO2017 | `yolo26x_stock_960` | 0.6281 | strongest overall reference, but not mobile-relevant |
+| OCHuman | `yolo26n_chv_wp_coco_och_640` | 0.7004 | best hard-occlusion result |
 
-```text
-CH only on WP:        mAP50-95 = 0.2739
-CH + WP on WP:        mAP50-95 = 0.4676
-```
+### 8.4 Interpretation
 
-Adding COCO strongly improves COCO validation performance:
+The results show a clear multi-domain tradeoff:
 
-```text
-CH + WP on COCO:      mAP50-95 = 0.4050
-CH + WP + COCO:       mAP50-95 = 0.5388
-```
+- CrowdHuman-only training gives the cleanest optimization for the CrowdHuman visible-box domain.
+- Adding WiderPerson, COCO, and OCHuman improves the domains they represent, especially at the stricter mAP50-95 metric.
+- The best balanced mobile-oriented checkpoint is `yolo26n_chv_wp_coco_och_960`.
+- `yolo26s_chv_960` is the strongest CrowdHuman-specific model.
+- `yolo26x_stock_960` is useful as an upper-bound reference, especially on COCO, but not as a realistic final deployment choice.
 
-Adding OCHuman strongly improves OCHuman validation performance:
-
-```text
-CH + WP + COCO on OCH:      mAP50-95 = 0.5040
-CH + WP + COCO + OCH on OCH: mAP50-95 = 0.7004
-```
-
-However, adding more datasets slightly reduces CrowdHuman performance:
-
-```text
-CH only on CH:              mAP50-95 = 0.4824
-CH + WP + COCO + OCH on CH: mAP50-95 = 0.4592
-```
-
-This is not surprising. The datasets have different image distributions and probably slightly different bounding-box annotation styles. The model learns a compromise across datasets rather than optimizing perfectly for CrowdHuman visible boxes.
-
-### 8.4 Is this overfitting?
-
-The pattern is not best described as simple overfitting. It is more likely a combination of:
-
-- dataset domain shift;
-- annotation-style differences;
-- dataset imbalance;
-- optimization interference between domains;
-- different object scales and occlusion types;
-- possible conversion/labeling noise.
-
-Overfitting could play a role, especially for smaller datasets such as OCHuman, but the more important observation is **multi-domain tradeoff**: each added dataset improves its own domain, but the optimal detector behavior is not identical across all datasets.
+This pattern is better explained by domain shift, annotation-style mismatch, and dataset balancing tradeoffs than by simple overfitting alone.
 
 ---
 
@@ -554,147 +450,110 @@ Overfitting could play a role, especially for smaller datasets such as OCHuman, 
 
 ### 9.1 Scientific conclusion
 
-The experiments support the idea that dataset composition has a major effect on occluded/visible-person detection. Training only on CrowdHuman gives the best CrowdHuman-specific performance, while adding WiderPerson, COCO, and OCHuman improves cross-dataset robustness and macro-average performance. This shows that the project is not just “fine-tune YOLO once”; it investigates how training data affects generalization for a specific target task.
+The experiments support the idea that dataset composition has a major effect on occluded visible-person detection. Fine-tuning improves results over stock checkpoints, and progressively adding WiderPerson, COCO, and OCHuman improves cross-dataset robustness and macro-average performance. The project therefore goes beyond "fine-tune YOLO once" and becomes a study of how training-data composition, input size, and checkpoint choice affect generalization for the target task.
 
 ### 9.2 Practical app conclusion
 
-For the actual game/app, the best current candidate is likely:
+For the actual app, the best current candidate is:
 
 ```text
-yolo26n or yolo26s trained on CH + WP + COCO + OCH
+yolo26n_chv_wp_coco_och_960
 ```
 
-provided it also performs well on a custom phone-shot test set. Including OCHuman makes sense for production because heavily occluded people are part of the target use case.
+because it has the best macro-average across the four public validation domains while staying within a realistic mobile-oriented model family.
 
-For a cleaner benchmark claim, the report should distinguish:
+A second strong candidate is:
 
 ```text
-Generalization experiment:
-  train without OCHuman, test on OCHuman.
-
-Production-oriented model:
-  train with OCHuman included, then test on custom app-like images.
+yolo26s_chv_960
 ```
+
+which is the strongest CrowdHuman-specific checkpoint and could still be acceptable if the final app can tolerate the heavier inference cost.
+
+Both conclusions remain conditional on a custom phone-shot evaluation set. Public datasets are useful, but they are not the final judge of app relevance.
 
 ---
 
 ## 10. Comparison with the original plan
 
-The final detection work stayed aligned with the original project direction, but the emphasis shifted. The original plan defined the detector as **occlusion-robust visible-person detection** for a mobile hit-localization pipeline, with YOLO26 as the practical starting point, CrowdHuman visible boxes as the primary dataset, and merged datasets as an optional extension. This core direction was preserved.
+The final detection work stayed aligned with the original project direction. The detector remained focused on visible-person detection, CrowdHuman visible boxes remained the central fine-tuning target, and YOLO26 remained the practical model family.
 
-### 10.1 Parts that stayed close to the original plan
+The main shift was emphasis:
 
-The following original decisions were implemented directly:
+- the project expanded strongly into a systematic dataset-composition study
+- cross-dataset evaluation became much more central than originally planned
+- stock `n`, `s`, and `x` references were added to contextualize what fine-tuning actually contributes
 
-- the task was treated as visible-person detection, not generic COCO object detection;
-- CrowdHuman visible boxes were used as the primary fine-tuning target;
-- YOLO26 was used because it offers practical fine-tuning, speed/accuracy scaling, and mobile/export relevance;
-- the detector was trained as a one-class `person` model rather than a `person`/`not-person` classifier;
-- `yolo26n` and `yolo26s` were prioritized because they are the most realistic mobile/near-mobile candidates;
-- 640 and 960 input sizes were tested;
-- merged-dataset training was implemented through YAML files rather than physically copying data;
-- models were evaluated separately on each dataset instead of only on a merged validation set.
+The main planned items that are still incomplete are:
 
-### 10.2 Parts that expanded beyond the original minimum plan
+- visible-box vs full-body-box ablation
+- custom phone-shot evaluation
+- final mobile export / validation
 
-The original plan suggested merged-dataset fine-tuning as optional. In the completed work, this became one of the main experimental axes. The final setup systematically tested:
-
-```text
-CrowdHuman
-CrowdHuman + WiderPerson
-CrowdHuman + WiderPerson + COCO2017 person
-CrowdHuman + WiderPerson + COCO2017 person + OCHuman
-```
-
-This was a useful expansion because the results showed clear dataset-domain effects: adding a dataset strongly improved performance on that dataset, while sometimes slightly lowering performance on previously dominant datasets. This gave the project a stronger experimental question: **how does training-data composition affect occluded visible-person detection?**
-
-The completed work also expanded the evaluation side by including pretrained baselines and a high-capacity YOLO26x reference model. This was not central to the original minimum scope, but it helps contextualize how much fine-tuning helps compared with simply using a larger pretrained detector.
-
-### 10.3 Parts not completed or intentionally deprioritized
-
-Some planned or optional parts were not completed in the detection subproject:
-
-| Planned item | Status | Reason / interpretation |
-|---|---|---|
-| CrowdHuman visible-box vs full-body-box ablation | Not completed | Useful idea, but dataset-composition experiments became the main focus. |
-| Custom phone-shot test set | Not yet completed | Still the most important next step for proving app relevance. |
-| Mobile export / quantized model validation | Not yet completed | Requires final model selection first. |
-| Extensive hyperparameter tuning | Intentionally deprioritized | Too time-consuming for a ~50-hour project; threshold tuning is more realistic. |
-| Transformer-detector training such as RF-DETR / Grounding DINO | Not implemented | Considered, but YOLO26 was more practical and mobile-relevant. |
-| Larger fine-tuned YOLO26m/l/x models | Mostly not pursued | Less relevant for mobile; YOLO26x was used only as a pretrained reference. |
-
-### 10.4 Overall deviation assessment
-
-The project did **not** deviate away from the original goal. It remained focused on visible, occluded person detection for the downstream hit-localization pipeline. The main deviation was that the implementation became more systematic on dataset composition and cross-dataset evaluation, while some originally suggested ablations such as `vbox` vs `fbox` and custom phone-shot evaluation remain future work.
-
-A concise report statement would be:
-
-> The final detection work preserved the original task definition and model rationale, but shifted effort toward a more systematic dataset-composition study. This was a justified change because the major practical uncertainty was not whether YOLO can detect people, but which training data mixture best supports visible and occluded person detection across domains.
 ---
 
 ## 11. Recommended next steps
 
-### 10.1 Create a custom app-like test set
+### 11.1 Create a custom app-like test set
 
-This is the most important next step. Public validation sets are useful, but they do not fully match the final app. A small custom test set should include:
+This is the most important next step. A useful custom test set should include:
 
-- phone-camera images;
-- people near the center/crosshair;
-- partial body visibility;
-- occlusion by furniture/walls/other people;
-- different distances and lighting;
-- images without people;
-- people at image edges;
-- cases where only a hand/leg/torso is visible.
+- phone-camera images
+- people near the center / crosshair
+- partial body visibility
+- occlusion by furniture, walls, and other people
+- different distances and lighting
+- negative images with no people
+- edge-of-frame cases
+- extreme partial-visibility cases such as only a hand, leg, or torso
 
-Even 100–300 manually labeled images would make the evaluation much more convincing.
+Even 100-300 manually labeled images would make the final conclusions much more convincing.
 
-### 10.2 Compare 640 vs 960
+### 11.2 Validate the two leading public-set candidates
 
-The next useful experiment is not necessarily a larger model. It is evaluating whether higher input resolution improves partial-person recall:
+The most important head-to-head comparison for the next stage is:
 
 ```text
-yolo26n 640 vs yolo26n 960
-yolo26s 640 vs yolo26s 960
+yolo26n_chv_wp_coco_och_960
+vs
+yolo26s_chv_960
 ```
 
-The 960 models cost more compute but may detect small/partial people better.
+The first is the best balanced mobile-oriented checkpoint by macro-average. The second is the strongest CrowdHuman-specific checkpoint.
 
-### 10.3 Tune confidence threshold
+### 11.3 Tune confidence threshold
 
-Full hyperparameter tuning is probably too time-consuming for a 50-hour project. However, confidence-threshold tuning is cheap and directly relevant to the app.
+Full hyperparameter search is probably not worth the time budget, but confidence-threshold tuning is cheap and directly relevant to the app.
 
-Test thresholds such as:
+Useful thresholds to test:
 
 ```text
 0.10, 0.15, 0.20, 0.25, 0.30, 0.40
 ```
 
-Because false negatives are costly, the app may prefer a lower threshold with higher recall, allowing segmentation/ReID to reject false positives later.
+Because false negatives are costly, a lower threshold with higher recall may be preferable if downstream segmentation / ReID can reject false positives.
 
-### 10.4 Error analysis
+### 11.4 Error analysis
 
-For the final report, include qualitative failure categories:
+For the final report, include qualitative failure categories such as:
 
-- missed tiny/partial person;
-- loose box;
-- duplicate detections;
-- false positive on background object;
-- person visible but not centered;
-- severe occlusion missed;
-- incorrect localization around mask-derived boxes.
+- missed tiny / partial person
+- loose box
+- duplicate detections
+- false positive on background object
+- person visible but not centered
+- severe occlusion missed
+- inconsistent localization around mask-derived boxes
 
-This makes the evaluation more convincing than metrics alone.
+### 11.5 Mobile export
 
-### 10.5 Mobile export
+Export the best `n` checkpoint to deployment-friendly formats and validate parity:
 
-Export the best `n` model to a mobile-friendly format and verify parity:
+- ONNX
+- TFLite / CoreML / NCNN depending on target
+- FP16 or INT8 if supported
 
-- ONNX as a first deployment-neutral format;
-- TFLite / CoreML / NCNN depending on target platform;
-- FP16 or INT8 quantization if supported.
-
-Export should be validated by comparing predictions/metrics between `.pt` and exported model.
+The exported model must be compared against the `.pt` checkpoint to confirm that deployment optimization does not damage accuracy too much.
 
 ---
 
@@ -702,18 +561,16 @@ Export should be validated by comparing predictions/metrics between `.pt` and ex
 
 A good report framing is:
 
-> We implemented a person-detection subsystem for a mobile camera-based game where the detector must find visible people, including partially occluded persons. We chose YOLO26 because it provides a strong accuracy/speed tradeoff, supports small mobile-friendly models, and has mature training/export tooling. We converted multiple public person datasets into a unified one-class YOLO format and systematically studied how dataset composition affects cross-dataset detection performance. The results show that each dataset contributes useful domain-specific information, while also introducing mild cross-domain tradeoffs likely caused by annotation and distribution differences. The best public-validation macro-average was obtained by training on all datasets, but the final model should be selected using a custom app-like test set.
+> We implemented a person-detection subsystem for a mobile camera-based game where the detector must find visible people, including partially occluded persons. We chose YOLO26 because it provides a strong accuracy / speed tradeoff, supports small mobile-friendly models, and has mature training and export tooling. We converted multiple public person datasets into a unified one-class YOLO format and systematically studied how dataset composition, input size, and checkpoint choice affect cross-dataset detection performance. The best macro-average public-set result came from a YOLO26n model fine-tuned on CrowdHuman visible boxes plus WiderPerson, COCO, and OCHuman at 960 resolution, while a YOLO26s CrowdHuman-visible-box fine-tune produced the strongest CrowdHuman-specific result. Final model selection should still be made using a custom app-like test set.
 
-This demonstrates:
+This narrative highlights:
 
-- clear problem definition;
-- justified model choice;
-- careful dataset selection;
-- nontrivial data conversion;
-- HPC engineering and reproducible scripts;
-- systematic ablation experiments;
-- thoughtful interpretation of results;
-- realistic next steps for deployment.
+- clear problem definition
+- justified model choice
+- nontrivial data conversion
+- meaningful HPC engineering work
+- systematic ablations
+- realistic deployment thinking
 
 ---
 
@@ -721,15 +578,18 @@ This demonstrates:
 
 Current limitations:
 
-- Public datasets do not perfectly match the final app distribution.
+- Public datasets still do not perfectly match the final app distribution.
 - Bounding-box semantics differ slightly across datasets.
 - Dataset balancing was not explicitly controlled.
-- The numeric result table currently documents the most complete `yolo26n @640` dataset-composition ablation; the additional 960, pretrained-baseline, YOLO26s, and YOLO26x reference evaluations should be summarized in the final report once their CSV/Markdown outputs are consolidated.
-- OCHuman-as-training improves OCHuman validation, but then OCHuman is not a clean held-out benchmark.
-- Inference times measured on HPC GPU do not directly equal mobile latency.
-- Hyperparameters were mostly kept fixed; no extensive hyperparameter search was performed.
+- The best public-set checkpoint (`yolo26n_chv_wp_coco_och_960`) is still only a proxy for real app performance until it is tested on custom phone-shot data.
+- OCHuman-as-training improves OCHuman validation, but then OCHuman is no longer a clean held-out benchmark.
+- Inference times measured on the HPC GPU do not directly equal mobile latency.
+- The reported inference times are also not fully hardware-controlled across checkpoints, because most evaluations were run on V100 while `yolo26s_stock_640` was run on H100.
+- Hyperparameters were mostly kept fixed; there was no extensive search.
+- `yolo26x_stock_960` is useful as an upper-bound reference, but not a realistic final deployment candidate.
+- The attempted `yolo26x` fine-tuning run was not completed.
 
-These are acceptable limitations for a ~50-hour course project, especially because the project already includes systematic dataset experiments and realistic engineering work.
+These are acceptable limitations for a roughly 50-hour course project, especially because the subproject already includes systematic experiments and substantial engineering work.
 
 ---
 

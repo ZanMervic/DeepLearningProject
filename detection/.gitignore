@@ -2,3 +2,8 @@ data/
 datasets/
 outputs/runs
 outputs/slurm
+*.png
+*.jpg
+*.jpeg
+*_train.out
+*.pt
