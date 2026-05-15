@@ -1,0 +1,23 @@
+[
+  {
+    "key": "yolo26n_all_640",
+    "label": "YOLO26n_all_640",
+    "assetFile": "models/yolo26n_all_640.tflite",
+    "inputSize": 640,
+    "defaultThreshold": 0.2
+  },
+  {
+    "key": "yolo26n_all_960",
+    "label": "YOLO26n_all_960",
+    "assetFile": "models/yolo26n_all_960.tflite",
+    "inputSize": 960,
+    "defaultThreshold": 0.2
+  },
+  {
+    "key": "yolo26s_chv_960",
+    "label": "YOLO26s_chv_960",
+    "assetFile": "models/yolo26s_chv_960.tflite",
+    "inputSize": 960,
+    "defaultThreshold": 0.2
+  }
+]
